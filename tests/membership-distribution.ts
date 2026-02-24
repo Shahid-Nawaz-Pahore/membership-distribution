@@ -439,6 +439,145 @@ describe("membership-distribution strict campaign invariants", function () {
     );
   });
 
+  it("rejects zero-allocation recipient registration", async () => {
+    const fixture = await createStrictDistribution();
+    const recipientWallet = Keypair.generate();
+    const recipient = deriveRecipientPda(
+      fixture.distribution.publicKey,
+      recipientWallet.publicKey
+    );
+
+    await assertProgramError(
+      () =>
+        program.methods
+          .registerRecipient(recipientWallet.publicKey, new BN(0))
+          .accounts({
+            distribution: fixture.distribution.publicKey,
+            recipient,
+            authority: wallet.publicKey,
+            systemProgram: SystemProgram.programId,
+          })
+          .rpc(),
+      "AllocationMustBePositive"
+    );
+    await assertDistributionState(fixture.distribution.publicKey, {
+      totalRecipients: 0,
+      totalAllocated: new BN(0),
+      totalDistributed: new BN(0),
+      totalFunded: new BN(0),
+      claimedRecipients: 0,
+      isLocked: false,
+      isExpired: false,
+    });
+  });
+
+  it("rejects unauthorized recipient registration", async () => {
+    const fixture = await createStrictDistribution();
+    const attacker = Keypair.generate();
+    const recipientWallet = Keypair.generate();
+    const recipient = deriveRecipientPda(
+      fixture.distribution.publicKey,
+      recipientWallet.publicKey
+    );
+
+    await airdropSol(attacker.publicKey);
+    await assertProgramError(
+      () =>
+        program.methods
+          .registerRecipient(recipientWallet.publicKey, tinyAllocation)
+          .accounts({
+            distribution: fixture.distribution.publicKey,
+            recipient,
+            authority: attacker.publicKey,
+            systemProgram: SystemProgram.programId,
+          })
+          .signers([attacker])
+          .rpc(),
+      "Unauthorized"
+    );
+    await assertDistributionState(fixture.distribution.publicKey, {
+      totalRecipients: 0,
+      totalAllocated: new BN(0),
+      isLocked: false,
+      isExpired: false,
+    });
+  });
+
+  it("rejects funding before distribution lock", async () => {
+    const fixture = await createStrictDistribution();
+    await mintTo(
+      provider.connection,
+      wallet.payer,
+      mint,
+      authorityTokenAccount,
+      wallet.publicKey,
+      1n
+    );
+
+    await assertProgramError(
+      () =>
+        program.methods
+          .fundVault(new BN(1))
+          .accounts({
+            distribution: fixture.distribution.publicKey,
+            authority: wallet.publicKey,
+            mint,
+            sourceTokenAccount: authorityTokenAccount,
+            vault: fixture.vault,
+            tokenProgram: TOKEN_PROGRAM_ID,
+          })
+          .rpc(),
+      "DistributionNotLocked"
+    );
+    await assertDistributionState(fixture.distribution.publicKey, {
+      totalFunded: new BN(0),
+      totalDistributed: new BN(0),
+      claimedRecipients: 0,
+      isLocked: false,
+      isExpired: false,
+    });
+  });
+
+  it("rejects expire_distribution before expiry timestamp", async () => {
+    const fixture = await createStrictDistribution();
+    await assertProgramError(
+      () =>
+        program.methods
+          .expireDistribution()
+          .accounts({ distribution: fixture.distribution.publicKey })
+          .rpc(),
+      "ExpiryNotReached"
+    );
+    await assertDistributionState(fixture.distribution.publicKey, {
+      isExpired: false,
+    });
+  });
+
+  it("rejects withdraw_unclaimed before expiry timestamp", async () => {
+    const fixture = await createStrictDistribution();
+    await assertProgramError(
+      () =>
+        program.methods
+          .withdrawUnclaimed(new BN(1))
+          .accounts({
+            distribution: fixture.distribution.publicKey,
+            authority: wallet.publicKey,
+            mint,
+            vaultAuthority: fixture.vaultAuthority,
+            vault: fixture.vault,
+            destinationTokenAccount: authorityTokenAccount,
+            tokenProgram: TOKEN_PROGRAM_ID,
+          })
+          .rpc(),
+      "ExpiryNotReached"
+    );
+    await assertDistributionState(fixture.distribution.publicKey, {
+      isExpired: false,
+      totalFunded: new BN(0),
+      totalDistributed: new BN(0),
+    });
+  });
+
   it("fails to lock when fewer than 120 recipients are registered", async () => {
     const fixture = await createStrictDistribution();
     const recipients = Array.from({ length: MAX_RECIPIENTS - 1 }, () =>
@@ -540,6 +679,8 @@ describe("membership-distribution strict campaign invariants", function () {
     let fixture: DistributionFixture;
     let recipients: Keypair[];
     let allocations: BN[];
+    let distributedSoFar: BN;
+    let claimedSoFar: number;
 
     before(
       "create exactly-120 recipient distribution, lock and fund",
@@ -549,6 +690,8 @@ describe("membership-distribution strict campaign invariants", function () {
           Keypair.generate()
         );
         allocations = buildCompliantAllocations();
+        distributedSoFar = new BN(0);
+        claimedSoFar = 0;
 
         await registerRecipients(
           fixture.distribution.publicKey,
@@ -606,8 +749,8 @@ describe("membership-distribution strict campaign invariants", function () {
         expect(vaultAccount.amount.toString()).to.eq(totalCap.toString());
         await assertDistributionState(fixture.distribution.publicKey, {
           totalFunded: totalCap,
-          totalDistributed: new BN(0),
-          claimedRecipients: 0,
+          totalDistributed: distributedSoFar,
+          claimedRecipients: claimedSoFar,
           isLocked: true,
           isExpired: false,
         });
@@ -623,6 +766,23 @@ describe("membership-distribution strict campaign invariants", function () {
         totalAllocated: totalCap,
         isLocked: true,
         isExpired: false,
+      });
+    });
+
+    it("rejects lock_distribution when already locked", async () => {
+      await assertProgramError(
+        () =>
+          program.methods
+            .lockDistribution()
+            .accounts({
+              distribution: fixture.distribution.publicKey,
+              authority: wallet.publicKey,
+            })
+            .rpc(),
+        "DistributionLocked"
+      );
+      await assertDistributionState(fixture.distribution.publicKey, {
+        isLocked: true,
       });
     });
 
@@ -647,10 +807,34 @@ describe("membership-distribution strict campaign invariants", function () {
       expect(vaultAccount.amount.toString()).to.eq(totalCap.toString());
       await assertDistributionState(fixture.distribution.publicKey, {
         totalFunded: totalCap,
-        totalDistributed: new BN(0),
-        claimedRecipients: 0,
+        totalDistributed: distributedSoFar,
+        claimedRecipients: claimedSoFar,
         isLocked: true,
         isExpired: false,
+      });
+    });
+
+    it("rejects zero amount funding when distribution is locked", async () => {
+      await assertProgramError(
+        () =>
+          program.methods
+            .fundVault(new BN(0))
+            .accounts({
+              distribution: fixture.distribution.publicKey,
+              authority: wallet.publicKey,
+              mint,
+              sourceTokenAccount: authorityTokenAccount,
+              vault: fixture.vault,
+              tokenProgram: TOKEN_PROGRAM_ID,
+            })
+            .rpc(),
+        "AmountMustBePositive"
+      );
+      await assertDistributionState(fixture.distribution.publicKey, {
+        totalFunded: totalCap,
+        totalDistributed: distributedSoFar,
+        claimedRecipients: claimedSoFar,
+        isLocked: true,
       });
     });
 
@@ -690,9 +874,11 @@ describe("membership-distribution strict campaign invariants", function () {
       expect(claimantBalance.amount.toString()).to.eq(
         allocations[0].toString()
       );
+      distributedSoFar = distributedSoFar.add(allocations[0]);
+      claimedSoFar += 1;
       await assertDistributionState(fixture.distribution.publicKey, {
-        totalDistributed: allocations[0],
-        claimedRecipients: 1,
+        totalDistributed: distributedSoFar,
+        claimedRecipients: claimedSoFar,
         isLocked: true,
         isExpired: false,
       });
@@ -718,11 +904,186 @@ describe("membership-distribution strict campaign invariants", function () {
         "RecipientAlreadyClaimed"
       );
       await assertDistributionState(fixture.distribution.publicKey, {
-        totalDistributed: allocations[0],
-        claimedRecipients: 1,
+        totalDistributed: distributedSoFar,
+        claimedRecipients: claimedSoFar,
         isLocked: true,
         isExpired: false,
       });
+    });
+
+    it("rejects unauthorized admin_distribute", async () => {
+      const attacker = Keypair.generate();
+      const target = recipients[2];
+      const recipient = deriveRecipientPda(
+        fixture.distribution.publicKey,
+        target.publicKey
+      );
+      const recipientTokenAccount = getAssociatedTokenAddressSync(
+        mint,
+        target.publicKey
+      );
+
+      await airdropSol(attacker.publicKey);
+      await assertProgramError(
+        () =>
+          program.methods
+            .adminDistribute()
+            .accounts({
+              distribution: fixture.distribution.publicKey,
+              recipient,
+              authority: attacker.publicKey,
+              recipientWallet: target.publicKey,
+              mint,
+              vaultAuthority: fixture.vaultAuthority,
+              vault: fixture.vault,
+              recipientTokenAccount,
+              tokenProgram: TOKEN_PROGRAM_ID,
+              associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+              systemProgram: SystemProgram.programId,
+            })
+            .signers([attacker])
+            .rpc(),
+        "Unauthorized"
+      );
+      await assertDistributionState(fixture.distribution.publicKey, {
+        totalDistributed: distributedSoFar,
+        claimedRecipients: claimedSoFar,
+        isLocked: true,
+      });
+    });
+
+    it("processes admin distribute and blocks second admin distribute", async () => {
+      const target = recipients[2];
+      const recipient = deriveRecipientPda(
+        fixture.distribution.publicKey,
+        target.publicKey
+      );
+      const recipientTokenAccount = getAssociatedTokenAddressSync(
+        mint,
+        target.publicKey
+      );
+
+      await program.methods
+        .adminDistribute()
+        .accounts({
+          distribution: fixture.distribution.publicKey,
+          recipient,
+          authority: wallet.publicKey,
+          recipientWallet: target.publicKey,
+          mint,
+          vaultAuthority: fixture.vaultAuthority,
+          vault: fixture.vault,
+          recipientTokenAccount,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc();
+
+      const targetBalance = await getAccount(
+        provider.connection,
+        recipientTokenAccount
+      );
+      expect(targetBalance.amount.toString()).to.eq(allocations[2].toString());
+      distributedSoFar = distributedSoFar.add(allocations[2]);
+      claimedSoFar += 1;
+      await assertDistributionState(fixture.distribution.publicKey, {
+        totalDistributed: distributedSoFar,
+        claimedRecipients: claimedSoFar,
+        isLocked: true,
+        isExpired: false,
+      });
+
+      await assertProgramError(
+        () =>
+          program.methods
+            .adminDistribute()
+            .accounts({
+              distribution: fixture.distribution.publicKey,
+              recipient,
+              authority: wallet.publicKey,
+              recipientWallet: target.publicKey,
+              mint,
+              vaultAuthority: fixture.vaultAuthority,
+              vault: fixture.vault,
+              recipientTokenAccount,
+              tokenProgram: TOKEN_PROGRAM_ID,
+              associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+              systemProgram: SystemProgram.programId,
+            })
+            .rpc(),
+        "RecipientAlreadyClaimed"
+      );
+      await assertDistributionState(fixture.distribution.publicKey, {
+        totalDistributed: distributedSoFar,
+        claimedRecipients: claimedSoFar,
+        isLocked: true,
+      });
+    });
+
+    it("invalidates a recipient and blocks later claim", async () => {
+      const target = recipients[3];
+      const recipient = deriveRecipientPda(
+        fixture.distribution.publicKey,
+        target.publicKey
+      );
+      const targetAta = getAssociatedTokenAddressSync(mint, target.publicKey);
+
+      await program.methods
+        .invalidateRecipient()
+        .accounts({
+          distribution: fixture.distribution.publicKey,
+          recipient,
+          authority: wallet.publicKey,
+        })
+        .rpc();
+
+      await airdropSol(target.publicKey);
+      await assertProgramError(
+        () =>
+          program.methods
+            .claim()
+            .accounts({
+              distribution: fixture.distribution.publicKey,
+              recipient,
+              claimant: target.publicKey,
+              mint,
+              vaultAuthority: fixture.vaultAuthority,
+              vault: fixture.vault,
+              claimantTokenAccount: targetAta,
+              tokenProgram: TOKEN_PROGRAM_ID,
+              associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+              systemProgram: SystemProgram.programId,
+            })
+            .signers([target])
+            .rpc(),
+        "RecipientInactive"
+      );
+      await assertDistributionState(fixture.distribution.publicKey, {
+        totalDistributed: distributedSoFar,
+        claimedRecipients: claimedSoFar,
+        isLocked: true,
+        isExpired: false,
+      });
+    });
+
+    it("rejects invalidating an already-claimed recipient", async () => {
+      const claimedRecipient = deriveRecipientPda(
+        fixture.distribution.publicKey,
+        recipients[0].publicKey
+      );
+      await assertProgramError(
+        () =>
+          program.methods
+            .invalidateRecipient()
+            .accounts({
+              distribution: fixture.distribution.publicKey,
+              recipient: claimedRecipient,
+              authority: wallet.publicKey,
+            })
+            .rpc(),
+        "RecipientAlreadyClaimed"
+      );
     });
 
     it("blocks claims after expiry and allows unclaimed withdrawal", async function () {
@@ -795,9 +1156,9 @@ describe("membership-distribution strict campaign invariants", function () {
       );
       expect(vaultAfterWithdraw.amount.toString()).to.eq("0");
       await assertDistributionState(fixture.distribution.publicKey, {
-        totalDistributed: allocations[0],
+        totalDistributed: distributedSoFar,
         totalFunded: totalCap,
-        claimedRecipients: 1,
+        claimedRecipients: claimedSoFar,
         isLocked: true,
         isExpired: true,
       });
