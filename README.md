@@ -2,8 +2,8 @@
 
 Production-ready Solana/Anchor program for membership token distribution with:
 
-- Up to `120` recipients per campaign
-- Configurable total cap and per-wallet allocations
+- **Strict Enforcement:** Exact 120 recipients, 250,000 tokens, and April 11, 2026 expiry hard-coded in contract logic.
+- Configurable per-wallet allocations (must sum to 250k)
 - Expiry-gated claims/transfers
 - Event logging for initialization, funding, claims, invalidations, expiry, and withdrawals
 

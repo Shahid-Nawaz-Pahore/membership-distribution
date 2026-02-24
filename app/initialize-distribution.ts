@@ -28,10 +28,10 @@ async function main() {
     throw new Error("Missing MINT env var");
   }
 
-  const maxRecipients = parseEnvInt("MAX_RECIPIENTS", 120);
-  const totalWholeTokens = process.env.TOTAL_WHOLE_TOKENS ?? "250000";
-  const expiryIso = process.env.EXPIRY_UTC ?? "2026-04-11T23:59:59Z";
-  const expiryTs = parseIsoToUnix(expiryIso);
+  const maxRecipients = 120;
+  const totalWholeTokens = "250000";
+  const expiryTs = 1775951999;
+  const expiryIso = "2026-04-11T23:59:59Z";
   const distributionKeypairPath =
     process.env.DISTRIBUTION_KEYPAIR ?? "app/out/distribution-keypair.json";
 

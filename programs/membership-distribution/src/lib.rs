@@ -6,7 +6,11 @@ declare_id!("54MDjjmV8xPhsgW2R2rKXVmTogyph6TJ5VKUcKgB7TYm");
 
 const RECIPIENT_SEED: &[u8] = b"recipient";
 const VAULT_AUTHORITY_SEED: &[u8] = b"vault-authority";
+
+/// CAMPAIGN CONSTANTS (Strict Compliance)
 const HARD_MAX_RECIPIENTS: u16 = 120;
+const CAMPAIGN_TOTAL_CAP_WHOLE: u64 = 250_000;
+const CAMPAIGN_EXPIRY_TS: i64 = 1775951999; // April 11, 2026, 23:59:59 UTC
 
 #[program]
 pub mod membership_distribution {
@@ -19,11 +23,19 @@ pub mod membership_distribution {
         expiry_ts: i64,
     ) -> Result<()> {
         let now = Clock::get()?.unix_timestamp;
+        
+        // Strict Enforcement of Campaign Requirements
         require!(
-            max_recipients > 0 && max_recipients <= HARD_MAX_RECIPIENTS,
+            max_recipients == HARD_MAX_RECIPIENTS,
             ErrorCode::InvalidMaxRecipients
         );
-        require!(total_cap > 0, ErrorCode::InvalidTotalCap);
+        let mint_decimals = ctx.accounts.mint.decimals;
+        let expected_cap = CAMPAIGN_TOTAL_CAP_WHOLE
+            .checked_mul(10u64.pow(mint_decimals as u32))
+            .ok_or(ErrorCode::MathOverflow)?;
+            
+        require!(total_cap == expected_cap, ErrorCode::InvalidTotalCap);
+        require!(expiry_ts == CAMPAIGN_EXPIRY_TS, ErrorCode::InvalidExpiry);
         require!(expiry_ts > now, ErrorCode::InvalidExpiry);
 
         let distribution = &mut ctx.accounts.distribution;
@@ -39,6 +51,7 @@ pub mod membership_distribution {
         distribution.total_cap = total_cap;
         distribution.total_allocated = 0;
         distribution.total_distributed = 0;
+        distribution.total_funded = 0;
         distribution.expiry_ts = expiry_ts;
         distribution.created_at = now;
 
@@ -145,6 +158,17 @@ pub mod membership_distribution {
             ErrorCode::DistributionNotLocked
         );
         require!(amount > 0, ErrorCode::AmountMustBePositive);
+
+        let distribution = &mut ctx.accounts.distribution;
+        distribution.total_funded = distribution
+            .total_funded
+            .checked_add(amount)
+            .ok_or(ErrorCode::MathOverflow)?;
+            
+        require!(
+            distribution.total_funded <= distribution.total_cap,
+            ErrorCode::CapExceeded
+        );
 
         let cpi_accounts = TransferChecked {
             from: ctx.accounts.source_token_account.to_account_info(),
@@ -447,6 +471,7 @@ pub struct UpdateDistribution<'info> {
 #[derive(Accounts)]
 pub struct FundVault<'info> {
     #[account(
+        mut,
         has_one = authority @ ErrorCode::Unauthorized,
         has_one = mint @ ErrorCode::InvalidMint,
         constraint = distribution.vault == vault.key() @ ErrorCode::InvalidVault
@@ -610,12 +635,13 @@ pub struct DistributionState {
     pub total_cap: u64,
     pub total_allocated: u64,
     pub total_distributed: u64,
+    pub total_funded: u64,
     pub expiry_ts: i64,
     pub created_at: i64,
 }
 
 impl DistributionState {
-    pub const LEN: usize = 32 + 32 + 32 + 1 + 1 + 1 + 2 + 2 + 2 + 8 + 8 + 8 + 8 + 8;
+    pub const LEN: usize = 32 + 32 + 32 + 1 + 1 + 1 + 2 + 2 + 2 + 8 + 8 + 8 + 8 + 8 + 8;
 }
 
 #[account]
@@ -694,11 +720,11 @@ pub struct UnclaimedWithdrawn {
 
 #[error_code]
 pub enum ErrorCode {
-    #[msg("Only up to 120 recipients are supported for this campaign.")]
+    #[msg("Campaign must have exactly 120 recipients.")]
     InvalidMaxRecipients,
-    #[msg("Total cap must be greater than zero.")]
+    #[msg("Campaign must have total cap of exactly 250,000 tokens.")]
     InvalidTotalCap,
-    #[msg("Expiry timestamp must be in the future.")]
+    #[msg("Expiry timestamp must match canonical April 11, 2026 (1775951999).")]
     InvalidExpiry,
     #[msg("Recipient allocation must be greater than zero.")]
     AllocationMustBePositive,

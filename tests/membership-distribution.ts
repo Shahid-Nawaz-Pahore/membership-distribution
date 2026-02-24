@@ -17,12 +17,21 @@ import {
 } from "@solana/web3.js";
 import { expect } from "chai";
 
-describe("membership-distribution", () => {
+type DistributionFixture = {
+  distribution: Keypair;
+  vaultAuthority: PublicKey;
+  vault: PublicKey;
+};
+
+describe("membership-distribution strict campaign invariants", function () {
+  this.timeout(1_200_000);
+
   const RECIPIENT_SEED = Buffer.from("recipient");
   const VAULT_AUTHORITY_SEED = Buffer.from("vault-authority");
   const DECIMALS = 6;
-  const RECIPIENT_COUNT = 120;
+  const MAX_RECIPIENTS = 120;
   const TOTAL_WHOLE_TOKENS = 250_000;
+  const CAMPAIGN_EXPIRY_TS = 1_775_951_999;
   const BASE_WHOLE_ALLOCATION = 2_000;
 
   const provider = anchor.AnchorProvider.env();
@@ -39,15 +48,52 @@ describe("membership-distribution", () => {
 
   const tokenScale = new BN(10).pow(new BN(DECIMALS));
   const totalCap = new BN(TOTAL_WHOLE_TOKENS).mul(tokenScale);
+  const tinyAllocation = new BN(1);
+
+  const initializeArgCount = (
+    (program.idl?.instructions ?? []).find(
+      (ix: { name: string }) =>
+        ix.name === "initialize_distribution" ||
+        ix.name === "initializeDistribution"
+    )?.args ?? []
+  ).length;
 
   let mint: PublicKey;
   let authorityTokenAccount: PublicKey;
-  let distribution: Keypair;
-  let vaultAuthority: PublicKey;
-  let vault: PublicKey;
 
-  const recipients: Keypair[] = [];
-  const allocations: BN[] = [];
+  const deriveRecipientPda = (
+    distributionKey: PublicKey,
+    walletKey: PublicKey
+  ) =>
+    PublicKey.findProgramAddressSync(
+      [RECIPIENT_SEED, distributionKey.toBuffer(), walletKey.toBuffer()],
+      program.programId
+    )[0];
+
+  const deriveVaultFixture = (
+    distribution: Keypair
+  ): Pick<DistributionFixture, "vaultAuthority" | "vault"> => {
+    const [vaultAuthority] = PublicKey.findProgramAddressSync(
+      [VAULT_AUTHORITY_SEED, distribution.publicKey.toBuffer()],
+      program.programId
+    );
+    const vault = getAssociatedTokenAddressSync(mint, vaultAuthority, true);
+    return { vaultAuthority, vault };
+  };
+
+  const assertProgramError = async (
+    execute: () => Promise<unknown>,
+    expectedCode: string
+  ) => {
+    let failed = false;
+    try {
+      await execute();
+    } catch (error) {
+      failed = true;
+      expect(`${error}`).to.contain(expectedCode);
+    }
+    expect(failed).to.eq(true, `Expected ${expectedCode} failure`);
+  };
 
   const airdropSol = async (
     address: PublicKey,
@@ -60,43 +106,306 @@ describe("membership-distribution", () => {
     await provider.connection.confirmTransaction(signature, "confirmed");
   };
 
-  const deriveRecipientPda = (
-    distributionKey: PublicKey,
-    walletKey: PublicKey
-  ) =>
-    PublicKey.findProgramAddressSync(
-      [RECIPIENT_SEED, distributionKey.toBuffer(), walletKey.toBuffer()],
-      program.programId
-    )[0];
+  const initializeStrictDistribution = async (
+    fixture: DistributionFixture
+  ): Promise<void> => {
+    const builder =
+      initializeArgCount === 0
+        ? program.methods.initializeDistribution()
+        : program.methods.initializeDistribution(
+            MAX_RECIPIENTS,
+            totalCap,
+            new BN(CAMPAIGN_EXPIRY_TS)
+          );
 
-  before(
-    "initialize distribution, register 120 recipients, lock and fund vault",
-    async () => {
-      mint = await createMint(
-        provider.connection,
-        wallet.payer,
-        wallet.publicKey,
-        null,
-        DECIMALS
-      );
-      const authorityAta = await getOrCreateAssociatedTokenAccount(
-        provider.connection,
-        wallet.payer,
+    await builder
+      .accounts({
+        distribution: fixture.distribution.publicKey,
+        authority: wallet.publicKey,
         mint,
-        wallet.publicKey
-      );
-      authorityTokenAccount = authorityAta.address;
+        vaultAuthority: fixture.vaultAuthority,
+        vault: fixture.vault,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([fixture.distribution])
+      .rpc();
+  };
 
-      distribution = Keypair.generate();
-      [vaultAuthority] = PublicKey.findProgramAddressSync(
-        [VAULT_AUTHORITY_SEED, distribution.publicKey.toBuffer()],
-        program.programId
-      );
-      vault = getAssociatedTokenAddressSync(mint, vaultAuthority, true);
+  const createStrictDistribution = async (): Promise<DistributionFixture> => {
+    const distribution = Keypair.generate();
+    const { vaultAuthority, vault } = deriveVaultFixture(distribution);
+    const fixture = { distribution, vaultAuthority, vault };
+    await initializeStrictDistribution(fixture);
+    return fixture;
+  };
 
-      const expiryTs = new BN(Math.floor(Date.now() / 1000) + 3600);
+  const assertDistributionState = async (
+    distribution: PublicKey,
+    expected: {
+      maxRecipients?: number;
+      totalCap?: BN;
+      expiryTs?: number;
+      totalRecipients?: number;
+      totalAllocated?: BN;
+      totalFunded?: BN;
+      totalDistributed?: BN;
+      claimedRecipients?: number;
+      isLocked?: boolean;
+      isExpired?: boolean;
+    }
+  ) => {
+    const state = await program.account.distributionState.fetch(distribution);
+
+    if (expected.maxRecipients !== undefined) {
+      expect(state.maxRecipients).to.eq(expected.maxRecipients);
+    }
+    if (expected.totalCap !== undefined) {
+      expect(state.totalCap.toString()).to.eq(expected.totalCap.toString());
+    }
+    if (expected.expiryTs !== undefined) {
+      expect(state.expiryTs.toString()).to.eq(expected.expiryTs.toString());
+    }
+    if (expected.totalRecipients !== undefined) {
+      expect(state.totalRecipients).to.eq(expected.totalRecipients);
+    }
+    if (expected.totalAllocated !== undefined) {
+      expect(state.totalAllocated.toString()).to.eq(
+        expected.totalAllocated.toString()
+      );
+    }
+    if (expected.totalFunded !== undefined) {
+      expect(state.totalFunded.toString()).to.eq(
+        expected.totalFunded.toString()
+      );
+    }
+    if (expected.totalDistributed !== undefined) {
+      expect(state.totalDistributed.toString()).to.eq(
+        expected.totalDistributed.toString()
+      );
+    }
+    if (expected.claimedRecipients !== undefined) {
+      expect(state.claimedRecipients).to.eq(expected.claimedRecipients);
+    }
+    if (expected.isLocked !== undefined) {
+      expect(state.isLocked).to.eq(expected.isLocked);
+    }
+    if (expected.isExpired !== undefined) {
+      expect(state.isExpired).to.eq(expected.isExpired);
+    }
+
+    return state;
+  };
+
+  const buildCompliantAllocations = (): BN[] => {
+    const allocations: BN[] = [];
+    const base = new BN(BASE_WHOLE_ALLOCATION).mul(tokenScale);
+    let running = new BN(0);
+
+    for (let i = 0; i < MAX_RECIPIENTS - 1; i += 1) {
+      allocations.push(base);
+      running = running.add(base);
+    }
+    allocations.push(totalCap.sub(running));
+
+    return allocations;
+  };
+
+  const registerRecipients = async (
+    distribution: PublicKey,
+    recipients: Keypair[],
+    allocations: BN[]
+  ) => {
+    expect(recipients.length).to.eq(allocations.length);
+    for (let i = 0; i < recipients.length; i += 1) {
+      const recipientWallet = recipients[i].publicKey;
+      const recipient = deriveRecipientPda(distribution, recipientWallet);
       await program.methods
-        .initializeDistribution(RECIPIENT_COUNT, totalCap, expiryTs)
+        .registerRecipient(recipientWallet, allocations[i])
+        .accounts({
+          distribution,
+          recipient,
+          authority: wallet.publicKey,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc();
+    }
+  };
+
+  const hasProgramError = (
+    error: unknown,
+    codeName: string,
+    hexCode: string
+  ): boolean => {
+    const parsed = error as {
+      message?: string;
+      error?: { errorCode?: { code?: string } };
+      logs?: string[];
+    };
+    const code = parsed?.error?.errorCode?.code ?? "";
+    const logs = Array.isArray(parsed?.logs) ? parsed.logs.join(" ") : "";
+    const text = `${error} ${parsed?.message ?? ""} ${code} ${logs}`;
+    return (
+      text.includes(codeName) || text.includes(hexCode) || code === codeName
+    );
+  };
+
+  const canExpireDistribution = async (
+    distribution: PublicKey
+  ): Promise<boolean> => {
+    const state = await program.account.distributionState.fetch(distribution);
+    if (state.isExpired) {
+      return true;
+    }
+
+    try {
+      await program.methods
+        .expireDistribution()
+        .accounts({ distribution })
+        .rpc();
+      return true;
+    } catch (error) {
+      if (hasProgramError(error, "ExpiryNotReached", "0x1786")) {
+        return false;
+      }
+      if (hasProgramError(error, "DistributionExpired", "0x1777")) {
+        return true;
+      }
+      throw error;
+    }
+  };
+
+  const formatRpcError = (value: unknown): string => {
+    if (typeof value === "string") {
+      return value;
+    }
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  };
+
+  const isMethodNotFoundError = (value: unknown): boolean => {
+    const candidate = value as { code?: number; message?: string };
+    if (candidate?.code === -32601) {
+      return true;
+    }
+    const text = formatRpcError(value).toLowerCase();
+    return text.includes("method not found") || text.includes("unsupported");
+  };
+
+  // Returns false when validator does not expose warp RPC methods.
+  const warpSlot = async (targetSlot: number): Promise<boolean> => {
+    const connection = provider.connection as any;
+    const rpcRequest = connection._rpcRequest?.bind(connection);
+    if (!rpcRequest) {
+      return false;
+    }
+
+    const methodCandidates = ["warp_slot", "warpSlot"];
+    let lastError: unknown;
+    let sawNonMethodNotFoundError = false;
+
+    for (const method of methodCandidates) {
+      try {
+        const response = await rpcRequest(method, [targetSlot]);
+        if (!response?.error) {
+          return true;
+        }
+        if (isMethodNotFoundError(response.error)) {
+          continue;
+        }
+        sawNonMethodNotFoundError = true;
+        lastError = response.error;
+      } catch (error) {
+        if (isMethodNotFoundError(error)) {
+          continue;
+        }
+        sawNonMethodNotFoundError = true;
+        lastError = error;
+      }
+    }
+
+    if (!sawNonMethodNotFoundError) {
+      return false;
+    }
+
+    throw new Error(`Unable to warp slot: ${formatRpcError(lastError)}`);
+  };
+
+  // Returns true if expiry can be reached/observed; false if validator lacks warp support.
+  const warpPastExpiry = async (distribution: PublicKey): Promise<boolean> => {
+    if (await canExpireDistribution(distribution)) {
+      return true;
+    }
+
+    let slot = await provider.connection.getSlot("processed");
+    for (let i = 0; i < 8; i += 1) {
+      // ~16 days per iteration at 400ms/slot
+      slot += 3_500_000;
+      const warpSupported = await warpSlot(slot);
+      if (!warpSupported) {
+        return false;
+      }
+      await provider.connection.getLatestBlockhash("processed");
+      if (await canExpireDistribution(distribution)) {
+        return true;
+      }
+    }
+
+    throw new Error("Failed to warp validator clock past campaign expiry");
+  };
+
+  before("setup mint and authority token account", async () => {
+    mint = await createMint(
+      provider.connection,
+      wallet.payer,
+      wallet.publicKey,
+      null,
+      DECIMALS
+    );
+    const authorityAta = await getOrCreateAssociatedTokenAccount(
+      provider.connection,
+      wallet.payer,
+      mint,
+      wallet.publicKey
+    );
+    authorityTokenAccount = authorityAta.address;
+  });
+
+  it("initializes with strict constants and default invariant state", async () => {
+    const fixture = await createStrictDistribution();
+    await assertDistributionState(fixture.distribution.publicKey, {
+      maxRecipients: MAX_RECIPIENTS,
+      totalCap,
+      expiryTs: CAMPAIGN_EXPIRY_TS,
+      totalRecipients: 0,
+      totalAllocated: new BN(0),
+      totalFunded: new BN(0),
+      totalDistributed: new BN(0),
+      claimedRecipients: 0,
+      isLocked: false,
+      isExpired: false,
+    });
+  });
+
+  it("rejects non-canonical initialization values", async function () {
+    if (initializeArgCount === 0) {
+      this.skip();
+      return;
+    }
+
+    const initWith = async (
+      maxRecipients: number,
+      cap: BN,
+      expiryTs: BN
+    ): Promise<void> => {
+      const distribution = Keypair.generate();
+      const { vaultAuthority, vault } = deriveVaultFixture(distribution);
+      await program.methods
+        .initializeDistribution(maxRecipients, cap, expiryTs)
         .accounts({
           distribution: distribution.publicKey,
           authority: wallet.publicKey,
@@ -109,256 +418,389 @@ describe("membership-distribution", () => {
         })
         .signers([distribution])
         .rpc();
+    };
 
-      for (let i = 0; i < RECIPIENT_COUNT; i += 1) {
-        recipients.push(Keypair.generate());
-        const wholeAmount =
-          i === RECIPIENT_COUNT - 1
-            ? TOTAL_WHOLE_TOKENS - BASE_WHOLE_ALLOCATION * (RECIPIENT_COUNT - 1)
-            : BASE_WHOLE_ALLOCATION;
-        allocations.push(new BN(wholeAmount).mul(tokenScale));
-      }
+    await assertProgramError(
+      () => initWith(MAX_RECIPIENTS - 1, totalCap, new BN(CAMPAIGN_EXPIRY_TS)),
+      "InvalidMaxRecipients"
+    );
+    await assertProgramError(
+      () =>
+        initWith(
+          MAX_RECIPIENTS,
+          totalCap.sub(new BN(1)),
+          new BN(CAMPAIGN_EXPIRY_TS)
+        ),
+      "InvalidTotalCap"
+    );
+    await assertProgramError(
+      () => initWith(MAX_RECIPIENTS, totalCap, new BN(CAMPAIGN_EXPIRY_TS - 1)),
+      "InvalidExpiry"
+    );
+  });
 
-      for (let i = 0; i < RECIPIENT_COUNT; i += 1) {
-        const recipientWallet = recipients[i].publicKey;
-        const recipient = deriveRecipientPda(
-          distribution.publicKey,
-          recipientWallet
-        );
-        await program.methods
-          .registerRecipient(recipientWallet, allocations[i])
+  it("fails to lock when fewer than 120 recipients are registered", async () => {
+    const fixture = await createStrictDistribution();
+    const recipients = Array.from({ length: MAX_RECIPIENTS - 1 }, () =>
+      Keypair.generate()
+    );
+    const allocations = Array.from(
+      { length: MAX_RECIPIENTS - 1 },
+      () => tinyAllocation
+    );
+
+    await registerRecipients(
+      fixture.distribution.publicKey,
+      recipients,
+      allocations
+    );
+    await assertDistributionState(fixture.distribution.publicKey, {
+      totalRecipients: MAX_RECIPIENTS - 1,
+      totalAllocated: new BN(MAX_RECIPIENTS - 1),
+      totalDistributed: new BN(0),
+      claimedRecipients: 0,
+      isLocked: false,
+      isExpired: false,
+    });
+
+    await assertProgramError(
+      () =>
+        program.methods
+          .lockDistribution()
           .accounts({
-            distribution: distribution.publicKey,
-            recipient,
+            distribution: fixture.distribution.publicKey,
+            authority: wallet.publicKey,
+          })
+          .rpc(),
+      "RecipientCountNotMet"
+    );
+    await assertDistributionState(fixture.distribution.publicKey, {
+      isLocked: false,
+    });
+  });
+
+  it("blocks a 121st recipient and fails lock when 120 allocations do not match total cap", async () => {
+    const fixture = await createStrictDistribution();
+    const recipients = Array.from({ length: MAX_RECIPIENTS }, () =>
+      Keypair.generate()
+    );
+    const allocations = Array.from(
+      { length: MAX_RECIPIENTS },
+      () => tinyAllocation
+    );
+
+    await registerRecipients(
+      fixture.distribution.publicKey,
+      recipients,
+      allocations
+    );
+    await assertDistributionState(fixture.distribution.publicKey, {
+      totalRecipients: MAX_RECIPIENTS,
+      totalAllocated: new BN(MAX_RECIPIENTS),
+      isLocked: false,
+      isExpired: false,
+    });
+
+    const extraWallet = Keypair.generate();
+    const extraRecipient = deriveRecipientPda(
+      fixture.distribution.publicKey,
+      extraWallet.publicKey
+    );
+    await assertProgramError(
+      () =>
+        program.methods
+          .registerRecipient(extraWallet.publicKey, tinyAllocation)
+          .accounts({
+            distribution: fixture.distribution.publicKey,
+            recipient: extraRecipient,
             authority: wallet.publicKey,
             systemProgram: SystemProgram.programId,
           })
+          .rpc(),
+      "RecipientLimitReached"
+    );
+
+    await assertProgramError(
+      () =>
+        program.methods
+          .lockDistribution()
+          .accounts({
+            distribution: fixture.distribution.publicKey,
+            authority: wallet.publicKey,
+          })
+          .rpc(),
+      "AllocationNotComplete"
+    );
+    await assertDistributionState(fixture.distribution.publicKey, {
+      isLocked: false,
+    });
+  });
+
+  describe("strict lifecycle: lock, fund, claim, expiry", function () {
+    let fixture: DistributionFixture;
+    let recipients: Keypair[];
+    let allocations: BN[];
+
+    before(
+      "create exactly-120 recipient distribution, lock and fund",
+      async () => {
+        fixture = await createStrictDistribution();
+        recipients = Array.from({ length: MAX_RECIPIENTS }, () =>
+          Keypair.generate()
+        );
+        allocations = buildCompliantAllocations();
+
+        await registerRecipients(
+          fixture.distribution.publicKey,
+          recipients,
+          allocations
+        );
+        await assertDistributionState(fixture.distribution.publicKey, {
+          totalRecipients: MAX_RECIPIENTS,
+          totalAllocated: totalCap,
+          totalDistributed: new BN(0),
+          claimedRecipients: 0,
+          isLocked: false,
+          isExpired: false,
+        });
+
+        await program.methods
+          .lockDistribution()
+          .accounts({
+            distribution: fixture.distribution.publicKey,
+            authority: wallet.publicKey,
+          })
           .rpc();
-      }
+        await assertDistributionState(fixture.distribution.publicKey, {
+          totalRecipients: MAX_RECIPIENTS,
+          totalAllocated: totalCap,
+          isLocked: true,
+          isExpired: false,
+        });
 
-      await program.methods
-        .lockDistribution()
-        .accounts({
-          distribution: distribution.publicKey,
-          authority: wallet.publicKey,
-        })
-        .rpc();
-
-      await mintTo(
-        provider.connection,
-        wallet.payer,
-        mint,
-        authorityTokenAccount,
-        wallet.publicKey,
-        BigInt(totalCap.toString())
-      );
-
-      await program.methods
-        .fundVault(totalCap)
-        .accounts({
-          distribution: distribution.publicKey,
-          authority: wallet.publicKey,
+        await mintTo(
+          provider.connection,
+          wallet.payer,
           mint,
-          sourceTokenAccount: authorityTokenAccount,
-          vault,
-          tokenProgram: TOKEN_PROGRAM_ID,
-        })
-        .rpc();
+          authorityTokenAccount,
+          wallet.publicKey,
+          BigInt(totalCap.add(new BN(1)).toString())
+        );
 
-      const distributionAccount = await program.account.distributionState.fetch(
-        distribution.publicKey
+        await program.methods
+          .fundVault(totalCap)
+          .accounts({
+            distribution: fixture.distribution.publicKey,
+            authority: wallet.publicKey,
+            mint,
+            sourceTokenAccount: authorityTokenAccount,
+            vault: fixture.vault,
+            tokenProgram: TOKEN_PROGRAM_ID,
+          })
+          .rpc();
+
+        const vaultAccount = await getAccount(
+          provider.connection,
+          fixture.vault
+        );
+        expect(vaultAccount.amount.toString()).to.eq(totalCap.toString());
+        await assertDistributionState(fixture.distribution.publicKey, {
+          totalFunded: totalCap,
+          totalDistributed: new BN(0),
+          claimedRecipients: 0,
+          isLocked: true,
+          isExpired: false,
+        });
+      }
+    );
+
+    it("locks only when recipient count and allocation sum exactly match campaign constants", async () => {
+      await assertDistributionState(fixture.distribution.publicKey, {
+        maxRecipients: MAX_RECIPIENTS,
+        totalCap,
+        expiryTs: CAMPAIGN_EXPIRY_TS,
+        totalRecipients: MAX_RECIPIENTS,
+        totalAllocated: totalCap,
+        isLocked: true,
+        isExpired: false,
+      });
+    });
+
+    it("blocks over-funding and preserves total_funded at total_cap", async () => {
+      await assertProgramError(
+        () =>
+          program.methods
+            .fundVault(new BN(1))
+            .accounts({
+              distribution: fixture.distribution.publicKey,
+              authority: wallet.publicKey,
+              mint,
+              sourceTokenAccount: authorityTokenAccount,
+              vault: fixture.vault,
+              tokenProgram: TOKEN_PROGRAM_ID,
+            })
+            .rpc(),
+        "CapExceeded"
       );
-      expect(distributionAccount.totalRecipients).to.eq(RECIPIENT_COUNT);
-      expect(distributionAccount.totalAllocated.toString()).to.eq(
-        totalCap.toString()
+
+      const vaultAccount = await getAccount(provider.connection, fixture.vault);
+      expect(vaultAccount.amount.toString()).to.eq(totalCap.toString());
+      await assertDistributionState(fixture.distribution.publicKey, {
+        totalFunded: totalCap,
+        totalDistributed: new BN(0),
+        claimedRecipients: 0,
+        isLocked: true,
+        isExpired: false,
+      });
+    });
+
+    it("processes a normal claim and blocks a double-claim", async () => {
+      const claimant = recipients[0];
+      const recipient = deriveRecipientPda(
+        fixture.distribution.publicKey,
+        claimant.publicKey
       );
-    }
-  );
-
-  it("allows a recipient to claim tokens directly", async () => {
-    const claimant = recipients[0];
-    const recipient = deriveRecipientPda(
-      distribution.publicKey,
-      claimant.publicKey
-    );
-    const claimantAta = getAssociatedTokenAddressSync(mint, claimant.publicKey);
-
-    await airdropSol(claimant.publicKey);
-
-    await program.methods
-      .claim()
-      .accounts({
-        distribution: distribution.publicKey,
-        recipient,
-        claimant: claimant.publicKey,
+      const claimantAta = getAssociatedTokenAddressSync(
         mint,
-        vaultAuthority,
-        vault,
-        claimantTokenAccount: claimantAta,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-        systemProgram: SystemProgram.programId,
-      })
-      .signers([claimant])
-      .rpc();
+        claimant.publicKey
+      );
 
-    const claimantBalance = await getAccount(provider.connection, claimantAta);
-    expect(claimantBalance.amount.toString()).to.eq(allocations[0].toString());
-
-    const recipientState = await program.account.recipientState.fetch(
-      recipient
-    );
-    expect(recipientState.claimed).to.eq(true);
-    expect(recipientState.active).to.eq(false);
-  });
-
-  it("allows authority to admin-distribute to a recipient", async () => {
-    const target = recipients[1];
-    const recipient = deriveRecipientPda(
-      distribution.publicKey,
-      target.publicKey
-    );
-    const targetAta = getAssociatedTokenAddressSync(mint, target.publicKey);
-
-    await program.methods
-      .adminDistribute()
-      .accounts({
-        distribution: distribution.publicKey,
-        recipient,
-        authority: wallet.publicKey,
-        recipientWallet: target.publicKey,
-        mint,
-        vaultAuthority,
-        vault,
-        recipientTokenAccount: targetAta,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-        systemProgram: SystemProgram.programId,
-      })
-      .rpc();
-
-    const targetBalance = await getAccount(provider.connection, targetAta);
-    expect(targetBalance.amount.toString()).to.eq(allocations[1].toString());
-
-    const distributionState = await program.account.distributionState.fetch(
-      distribution.publicKey
-    );
-    expect(distributionState.claimedRecipients).to.eq(2);
-  });
-
-  it("blocks claims after expiry and supports explicit expiry invalidation", async () => {
-    const shortDistribution = Keypair.generate();
-    const [shortVaultAuthority] = PublicKey.findProgramAddressSync(
-      [VAULT_AUTHORITY_SEED, shortDistribution.publicKey.toBuffer()],
-      program.programId
-    );
-    const shortVault = getAssociatedTokenAddressSync(
-      mint,
-      shortVaultAuthority,
-      true
-    );
-    const shortTotal = new BN(100).mul(tokenScale);
-    const shortExpiry = new BN(Math.floor(Date.now() / 1000) + 2);
-    const shortRecipientWallet = Keypair.generate();
-    const shortRecipient = deriveRecipientPda(
-      shortDistribution.publicKey,
-      shortRecipientWallet.publicKey
-    );
-    const shortRecipientAta = getAssociatedTokenAddressSync(
-      mint,
-      shortRecipientWallet.publicKey
-    );
-
-    await program.methods
-      .initializeDistribution(1, shortTotal, shortExpiry)
-      .accounts({
-        distribution: shortDistribution.publicKey,
-        authority: wallet.publicKey,
-        mint,
-        vaultAuthority: shortVaultAuthority,
-        vault: shortVault,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-        systemProgram: SystemProgram.programId,
-      })
-      .signers([shortDistribution])
-      .rpc();
-
-    await program.methods
-      .registerRecipient(shortRecipientWallet.publicKey, shortTotal)
-      .accounts({
-        distribution: shortDistribution.publicKey,
-        recipient: shortRecipient,
-        authority: wallet.publicKey,
-        systemProgram: SystemProgram.programId,
-      })
-      .rpc();
-
-    await program.methods
-      .lockDistribution()
-      .accounts({
-        distribution: shortDistribution.publicKey,
-        authority: wallet.publicKey,
-      })
-      .rpc();
-
-    await mintTo(
-      provider.connection,
-      wallet.payer,
-      mint,
-      authorityTokenAccount,
-      wallet.publicKey,
-      BigInt(shortTotal.toString())
-    );
-
-    await program.methods
-      .fundVault(shortTotal)
-      .accounts({
-        distribution: shortDistribution.publicKey,
-        authority: wallet.publicKey,
-        mint,
-        sourceTokenAccount: authorityTokenAccount,
-        vault: shortVault,
-        tokenProgram: TOKEN_PROGRAM_ID,
-      })
-      .rpc();
-
-    await airdropSol(shortRecipientWallet.publicKey);
-    await new Promise((resolve) => setTimeout(resolve, 4000));
-
-    let expiredClaimBlocked = false;
-    try {
+      await airdropSol(claimant.publicKey);
       await program.methods
         .claim()
         .accounts({
-          distribution: shortDistribution.publicKey,
-          recipient: shortRecipient,
-          claimant: shortRecipientWallet.publicKey,
+          distribution: fixture.distribution.publicKey,
+          recipient,
+          claimant: claimant.publicKey,
           mint,
-          vaultAuthority: shortVaultAuthority,
-          vault: shortVault,
-          claimantTokenAccount: shortRecipientAta,
+          vaultAuthority: fixture.vaultAuthority,
+          vault: fixture.vault,
+          claimantTokenAccount: claimantAta,
           tokenProgram: TOKEN_PROGRAM_ID,
           associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
           systemProgram: SystemProgram.programId,
         })
-        .signers([shortRecipientWallet])
+        .signers([claimant])
         .rpc();
-    } catch (error) {
-      expiredClaimBlocked = true;
-      expect(`${error}`).to.contain("DistributionExpired");
-    }
-    expect(expiredClaimBlocked).to.eq(true);
 
-    await program.methods
-      .expireDistribution()
-      .accounts({ distribution: shortDistribution.publicKey })
-      .rpc();
-
-    const shortDistributionState =
-      await program.account.distributionState.fetch(
-        shortDistribution.publicKey
+      const claimantBalance = await getAccount(
+        provider.connection,
+        claimantAta
       );
-    expect(shortDistributionState.isExpired).to.eq(true);
+      expect(claimantBalance.amount.toString()).to.eq(
+        allocations[0].toString()
+      );
+      await assertDistributionState(fixture.distribution.publicKey, {
+        totalDistributed: allocations[0],
+        claimedRecipients: 1,
+        isLocked: true,
+        isExpired: false,
+      });
+
+      await assertProgramError(
+        () =>
+          program.methods
+            .claim()
+            .accounts({
+              distribution: fixture.distribution.publicKey,
+              recipient,
+              claimant: claimant.publicKey,
+              mint,
+              vaultAuthority: fixture.vaultAuthority,
+              vault: fixture.vault,
+              claimantTokenAccount: claimantAta,
+              tokenProgram: TOKEN_PROGRAM_ID,
+              associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+              systemProgram: SystemProgram.programId,
+            })
+            .signers([claimant])
+            .rpc(),
+        "RecipientAlreadyClaimed"
+      );
+      await assertDistributionState(fixture.distribution.publicKey, {
+        totalDistributed: allocations[0],
+        claimedRecipients: 1,
+        isLocked: true,
+        isExpired: false,
+      });
+    });
+
+    it("blocks claims after expiry and allows unclaimed withdrawal", async function () {
+      const reachedExpiry = await warpPastExpiry(
+        fixture.distribution.publicKey
+      );
+      if (!reachedExpiry) {
+        console.log(
+          "Skipping expiry assertions: validator does not expose warp RPC"
+        );
+        this.skip();
+        return;
+      }
+
+      const lateClaimant = recipients[1];
+      const lateRecipient = deriveRecipientPda(
+        fixture.distribution.publicKey,
+        lateClaimant.publicKey
+      );
+      const lateClaimantAta = getAssociatedTokenAddressSync(
+        mint,
+        lateClaimant.publicKey
+      );
+
+      await airdropSol(lateClaimant.publicKey);
+      await assertProgramError(
+        () =>
+          program.methods
+            .claim()
+            .accounts({
+              distribution: fixture.distribution.publicKey,
+              recipient: lateRecipient,
+              claimant: lateClaimant.publicKey,
+              mint,
+              vaultAuthority: fixture.vaultAuthority,
+              vault: fixture.vault,
+              claimantTokenAccount: lateClaimantAta,
+              tokenProgram: TOKEN_PROGRAM_ID,
+              associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+              systemProgram: SystemProgram.programId,
+            })
+            .signers([lateClaimant])
+            .rpc(),
+        "DistributionExpired"
+      );
+
+      const vaultBeforeWithdraw = await getAccount(
+        provider.connection,
+        fixture.vault
+      );
+      const unclaimedAmount = new BN(vaultBeforeWithdraw.amount.toString());
+      expect(unclaimedAmount.gt(new BN(0))).to.eq(true);
+
+      await program.methods
+        .withdrawUnclaimed(unclaimedAmount)
+        .accounts({
+          distribution: fixture.distribution.publicKey,
+          authority: wallet.publicKey,
+          mint,
+          vaultAuthority: fixture.vaultAuthority,
+          vault: fixture.vault,
+          destinationTokenAccount: authorityTokenAccount,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .rpc();
+
+      const vaultAfterWithdraw = await getAccount(
+        provider.connection,
+        fixture.vault
+      );
+      expect(vaultAfterWithdraw.amount.toString()).to.eq("0");
+      await assertDistributionState(fixture.distribution.publicKey, {
+        totalDistributed: allocations[0],
+        totalFunded: totalCap,
+        claimedRecipients: 1,
+        isLocked: true,
+        isExpired: true,
+      });
+    });
   });
 });

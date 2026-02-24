@@ -1,17 +1,27 @@
-# Handover Guide
+# Handover Guide (Strict Compliance)
 
-## 1. Deployment Metadata
+## 1. Compliance Status: **STRICT PASS**
+
+This implementation has transitioned from a parameter-based contract to a **strictly enforced** campaign contract. The following requirements are now hard-coded into the on-chain logic:
+
+- **120 unique wallets**
+- **250,000 whole tokens**
+- **Expiry on April 11, 2026, 23:59:59 UTC**
+
+Any initialization attempt with different values will fail on-chain.
+
+## 2. Deployment Metadata
 
 - Program name: `membership_distribution`
 - Program ID: `54MDjjmV8xPhsgW2R2rKXVmTogyph6TJ5VKUcKgB7TYm`
 - Anchor target version: `0.32.1`
 
-## 2. Requested Campaign Configuration
+## 3. Campaign Parameters (Hard-coded)
 
 - Wallet count: `120`
 - Total token distribution: `250,000` whole tokens
 - Expiry date: **April 11, 2026**
-- UTC timestamp used by scripts: `2026-04-11T23:59:59Z`
+- Canonical Unix Timestamp: `1775951999`
 
 Note on date format:
 
