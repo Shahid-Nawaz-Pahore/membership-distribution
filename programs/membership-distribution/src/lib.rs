@@ -2,15 +2,15 @@ use anchor_lang::prelude::*;
 use anchor_spl::associated_token::AssociatedToken;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, TransferChecked};
 
-declare_id!("54MDjjmV8xPhsgW2R2rKXVmTogyph6TJ5VKUcKgB7TYm");
+declare_id!("GY6CCBRP3qnEZaHF2W6JebgD3sW73rLb7xoafMGUiGzF");
 
 const RECIPIENT_SEED: &[u8] = b"recipient";
 const VAULT_AUTHORITY_SEED: &[u8] = b"vault-authority";
 
 /// CAMPAIGN CONSTANTS (Strict Compliance)
-const HARD_MAX_RECIPIENTS: u16 = 120;
-const CAMPAIGN_TOTAL_CAP_WHOLE: u64 = 250_000;
-const CAMPAIGN_EXPIRY_TS: i64 = 1775951999; // April 11, 2026, 23:59:59 UTC
+const HARD_MAX_RECIPIENTS: u16 = 5;
+const CAMPAIGN_TOTAL_CAP_WHOLE: u64 = 250000;
+const CAMPAIGN_EXPIRY_TS: i64 = 1772176552;
 
 #[program]
 pub mod membership_distribution {
@@ -720,11 +720,11 @@ pub struct UnclaimedWithdrawn {
 
 #[error_code]
 pub enum ErrorCode {
-    #[msg("Campaign must have exactly 120 recipients.")]
+    #[msg("Campaign must have exactly 5 recipients.")]
     InvalidMaxRecipients,
     #[msg("Campaign must have total cap of exactly 250,000 tokens.")]
     InvalidTotalCap,
-    #[msg("Expiry timestamp must match canonical April 11, 2026 (1775951999).")]
+    #[msg("Expiry timestamp must be set to required compaign expiry timestamp in the future.")]
     InvalidExpiry,
     #[msg("Recipient allocation must be greater than zero.")]
     AllocationMustBePositive,

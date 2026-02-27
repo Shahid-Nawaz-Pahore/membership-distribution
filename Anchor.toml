@@ -7,14 +7,17 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-membership_distribution = "54MDjjmV8xPhsgW2R2rKXVmTogyph6TJ5VKUcKgB7TYm"
+membership_distribution = "GY6CCBRP3qnEZaHF2W6JebgD3sW73rLb7xoafMGUiGzF"
 
 [registry]
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "localnet"
+cluster = "https://api.devnet.solana.com"
 wallet = "~/.config/solana/id.json"
 
 [scripts]
-test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 \"tests/**/*.ts\""
+# Har step ki alag command
+phase1 = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 scripts/initialize.ts"
+phase2 = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 scripts/register.ts"
+phase3 = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 scripts/lock.ts"

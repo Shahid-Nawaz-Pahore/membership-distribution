@@ -29,7 +29,7 @@ describe("membership-distribution strict campaign invariants", function () {
   const RECIPIENT_SEED = Buffer.from("recipient");
   const VAULT_AUTHORITY_SEED = Buffer.from("vault-authority");
   const DECIMALS = 6;
-  const MAX_RECIPIENTS = 120;
+  const MAX_RECIPIENTS = 5;
   const TOTAL_WHOLE_TOKENS = 250_000;
   const CAMPAIGN_EXPIRY_TS = 1_775_951_999;
   const BASE_WHOLE_ALLOCATION = 2_000;
