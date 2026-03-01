@@ -4,7 +4,7 @@ import { MembershipDistribution } from "../target/types/membership_distribution"
 import { PublicKey, SystemProgram } from "@solana/web3.js";
 import * as fs from "fs";
 import * as dotenv from "dotenv";
-dotenv.config(); 
+dotenv.config();
 
 async function main() {
   const provider = anchor.AnchorProvider.env();
@@ -13,35 +13,31 @@ async function main() {
   const program = anchor.workspace
     .MembershipDistribution as Program<MembershipDistribution>;
 
-  // LOAD DISTRIBUTION ADDRESS
+  // Load distribution address
   const distributionAddress = new PublicKey(
     fs.readFileSync("distribution_address.txt", "utf-8")
   );
 
-  // PLACEHOLDER RECIPIENT WALLETS (replace later)
-  const recipientWallets = [
-    new PublicKey("AUHuA5cyvWQ4hzHe6YHNfE4eQpHvEtnDKHqVY9gbgDWi"),
-    new PublicKey("mooGAJGD4gF3HP9b5nRZDh9GFFHYMHNhXij3VLPWzkX"),
-    new PublicKey("2YKBqu5ejfjx3PoeAiX4piCXKK3FKn5HNTYTEL9ArMv2"),
-    new PublicKey("Bd7F9XJT9GNGbgfnQVW3RewdEsek51KuCXR6XJyWYAZs"),
-    new PublicKey("6ENXhky3QwqvXSFSDsHxfCXwgAbHGMHZqJqFUNimjq8L"),
-  ];
-
-  // TOTAL SUPPLY & EQUAL ALLOCATION
-  const TOTAL_SUPPLY = 250_000;
-  const MAX_RECIPIENTS = recipientWallets.length;
-  const ALLOCATION_WHOLE = TOTAL_SUPPLY / MAX_RECIPIENTS; // 50,000 each
-
-  // CONVERT TO SMALLEST UNIT (mint decimals = 6)
-  const ALLOCATION = new anchor.BN(ALLOCATION_WHOLE).mul(
-    new anchor.BN(10).pow(new anchor.BN(6))
+  // Load recipients.json
+  const recipientsData = JSON.parse(
+    fs.readFileSync("recipients.json", "utf-8")
   );
 
-  // LOOP TO REGISTER EACH RECIPIENT
-  for (let i = 0; i < recipientWallets.length; i++) {
-    const recipientWallet = recipientWallets[i];
+  const decimals = recipientsData.decimals;
+  const recipients = recipientsData.recipients;
 
-    // Derive PDA for recipient account
+  for (let i = 0; i < recipients.length; i++) {
+    const walletString = recipients[i].wallet;
+    const amountWhole = recipients[i].amount;
+
+    const recipientWallet = new PublicKey(walletString);
+
+    // Convert whole token amount to smallest unit
+    const allocation = new anchor.BN(amountWhole).mul(
+      new anchor.BN(10).pow(new anchor.BN(decimals))
+    );
+
+    // Derive recipient PDA
     const [recipientPda] = PublicKey.findProgramAddressSync(
       [
         Buffer.from("recipient"),
@@ -52,13 +48,12 @@ async function main() {
     );
 
     console.log(`Registering recipient ${i + 1}`);
-    console.log("Recipient PDA:", recipientPda.toBase58());
-    console.log("Recipient Wallet (placeholder):", recipientWallet.toBase58());
-    console.log("Allocation (smallest unit):", ALLOCATION.toString());
+    console.log("Wallet:", recipientWallet.toBase58());
+    console.log("Allocation smallest unit:", allocation.toString());
 
     try {
       const tx = await program.methods
-        .registerRecipient(recipientWallet, ALLOCATION)
+        .registerRecipient(recipientWallet, allocation)
         .accountsStrict({
           distribution: distributionAddress,
           recipient: recipientPda,
@@ -67,14 +62,14 @@ async function main() {
         })
         .rpc();
 
-      console.log(`✅ Recipient ${i + 1} registered successfully!`);
-      console.log("Transaction Signature:", tx);
+      console.log(`✅ Recipient ${i + 1} registered`);
+      console.log("Tx:", tx);
     } catch (err) {
-      console.error(`❌ Failed to register recipient ${i + 1}`);
+      console.error(`❌ Failed recipient ${i + 1}`);
       console.error(err);
     }
 
-    console.log("-------------------------------");
+    console.log("----------------------------------");
   }
 }
 
