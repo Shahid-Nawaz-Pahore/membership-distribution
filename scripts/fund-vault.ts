@@ -1,29 +1,40 @@
 import * as anchor from "@coral-xyz/anchor";
 import { MembershipDistribution } from "../target/types/membership_distribution";
+import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import fs from "fs";
 import * as dotenv from "dotenv";
-dotenv.config(); 
+dotenv.config();
+
 async function fundVault(amount: number) {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
 
-  const program = anchor.workspace.MembershipDistribution as anchor.Program<MembershipDistribution>;
+  const program =
+    anchor.workspace.MembershipDistribution as anchor.Program<MembershipDistribution>;
 
   const distributionAddress = new anchor.web3.PublicKey(
-    fs.readFileSync("distribution_address.txt", "utf8")
+    fs.readFileSync("distribution_address.txt", "utf8").trim()
   );
 
-  // Replace with your actual source token account (the authority's token account holding the mint)
-  const sourceTokenAccount = new anchor.web3.PublicKey(process.env.ADMIN_ATA_ADDRESS!);
+  const distribution =
+    await program.account.distributionState.fetch(distributionAddress);
 
-  // Replace with the vault ATA printed during initialization
-  const vault = new anchor.web3.PublicKey("CZir3oGuB5rgeWFAsYKSbskWijSGyihKek3ivMGBj7zB");
+  const mint = distribution.mint;
+  const vault = distribution.vault;
 
-  // Replace with your mint address
-  const mint = new anchor.web3.PublicKey(process.env.MINT_ADDRESS!);
+  // Automatically derive admin ATA
+  const sourceTokenAccount = getAssociatedTokenAddressSync(
+    mint,
+    provider.wallet.publicKey
+  );
+
+  console.log("Cluster:", provider.connection.rpcEndpoint);
+  console.log("Authority:", provider.wallet.publicKey.toBase58());
+  console.log("Source ATA:", sourceTokenAccount.toBase58());
+  console.log("Vault ATA:", vault.toBase58());
 
   const tx = await program.methods
-    .fundVault(new anchor.BN(amount)) // amount in smallest unit (like lamports / decimals)
+    .fundVault(new anchor.BN(amount))
     .accountsStrict({
       distribution: distributionAddress,
       authority: provider.wallet.publicKey,
@@ -37,5 +48,5 @@ async function fundVault(amount: number) {
   console.log("Vault funded successfully:", tx);
 }
 
-// Example: fund 50 tokens with 6 decimals → 50 * 10^6 = 50000000
+// Example call
 fundVault(250000000000).catch(console.error);

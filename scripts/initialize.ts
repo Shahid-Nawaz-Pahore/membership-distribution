@@ -27,7 +27,7 @@ async function main() {
   // =============================
   const HARD_MAX_RECIPIENTS = 5;
   const CAMPAIGN_TOTAL_CAP_WHOLE = 250000;
-  const CAMPAIGN_EXPIRY_TS = new anchor.BN(1772176552);
+  const CAMPAIGN_EXPIRY_TS = new anchor.BN(1772434830);
 
   // =============================
   // CONFIGURE YOUR MINT HERE

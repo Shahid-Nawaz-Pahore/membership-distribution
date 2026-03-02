@@ -2,7 +2,7 @@ use anchor_lang::prelude::*;
 use anchor_spl::associated_token::AssociatedToken;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, TransferChecked};
 
-declare_id!("GY6CCBRP3qnEZaHF2W6JebgD3sW73rLb7xoafMGUiGzF");
+declare_id!("HpvQENGUtUqc9eHw9fEwqdsRqH57ShXEzVqXTuY9HnyM");
 
 const RECIPIENT_SEED: &[u8] = b"recipient";
 const VAULT_AUTHORITY_SEED: &[u8] = b"vault-authority";
@@ -10,7 +10,7 @@ const VAULT_AUTHORITY_SEED: &[u8] = b"vault-authority";
 /// CAMPAIGN CONSTANTS (Strict Compliance)
 const HARD_MAX_RECIPIENTS: u16 = 5;
 const CAMPAIGN_TOTAL_CAP_WHOLE: u64 = 250000;
-const CAMPAIGN_EXPIRY_TS: i64 = 1772176552;
+const CAMPAIGN_EXPIRY_TS: i64 = 1772434830;
 
 #[program]
 pub mod membership_distribution {
