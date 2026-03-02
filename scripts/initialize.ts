@@ -25,9 +25,9 @@ async function main() {
   // =============================
   // CAMPAIGN CONSTANTS (MUST MATCH RUST)
   // =============================
-  const HARD_MAX_RECIPIENTS = 5;
+  const HARD_MAX_RECIPIENTS =120;
   const CAMPAIGN_TOTAL_CAP_WHOLE = 250000;
-  const CAMPAIGN_EXPIRY_TS = new anchor.BN(1772434830);
+  const CAMPAIGN_EXPIRY_TS = new anchor.BN(1775890800);
 
   // =============================
   // CONFIGURE YOUR MINT HERE

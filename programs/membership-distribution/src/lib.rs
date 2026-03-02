@@ -8,9 +8,9 @@ const RECIPIENT_SEED: &[u8] = b"recipient";
 const VAULT_AUTHORITY_SEED: &[u8] = b"vault-authority";
 
 /// CAMPAIGN CONSTANTS (Strict Compliance)
-const HARD_MAX_RECIPIENTS: u16 = 5;
+const HARD_MAX_RECIPIENTS: u16 = 120;
 const CAMPAIGN_TOTAL_CAP_WHOLE: u64 = 250000;
-const CAMPAIGN_EXPIRY_TS: i64 = 1772434830;
+const CAMPAIGN_EXPIRY_TS: i64 = 1775890800;
 
 #[program]
 pub mod membership_distribution {
